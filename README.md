@@ -6,12 +6,6 @@ First, run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
@@ -20,17 +14,23 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-## Learn More
+## Overview
 
-To learn more about Next.js, take a look at the following resources:
+- This project integrates the Sui Wallet with a trading system using the Sui TypeScript SDK. Users can connect their wallets, view balances, input trade amounts, and execute transactions efficiently.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Features
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Wallet Authentication: Connect and authenticate with Sui Wallet.
 
-## Deploy on Vercel
+- Balance Display: Show wallet balances with fiat values.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- Trade Execution: Calculate optimal trade routes and estimate trade metrics.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Transaction Signing: Sign and submit transactions to the blockchain.
+
+- Big Decimal Support: Handle large decimal values (e.g., 22,222,222.3333333333).
+
+- Formatted Inputs: Auto-format number inputs similar to Minswap.
+
+- Trade Adjustments: Input Half or Max amounts and switch trade direction.
+
