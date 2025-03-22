@@ -31,6 +31,13 @@ import { Coin, CoinsToPrice, RouterCompleteTradeRoute } from "aftermath-ts-sdk";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { generateTransaction, getSwapRoute } from "./actions";
 
+const availableTokens = [
+  { type: "0x2::sui::SUI", symbol: "SUI" },
+  {
+    type: "0x06864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS",
+    symbol: "CETUS",
+  },
+];
 interface SwapContractProps {
   aftermathData?: {
     from: string | string[];
@@ -66,6 +73,13 @@ interface SwapContractProps {
 const formSchema = z.object({
   fromAmount: z.string().regex(/^\d*\.?\d*$/, "Please enter a valid number"),
   toAmount: z.string().regex(/^\d*\.?\d*$/, "Please enter a valid number"),
+  slippage: z.string().refine(
+    (val) => {
+      const num = parseFloat(val);
+      return !isNaN(num) && num >= 0;
+    },
+    { message: "Slippage must be a positive number" }
+  ),
 });
 
 const SUI_TYPE = "0x2::sui::SUI";
@@ -74,6 +88,7 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
   const searchParams = useSearchParams();
   const searchFrom = searchParams.get("from");
   const searchTo = searchParams.get("to");
+  const [submitLoading, setSubmitLoading] = useState(false);
 
   const [swapRoute, setSwapRoute] = useState<
     RouterCompleteTradeRoute | { error: string }
@@ -83,29 +98,60 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
   const currentAccount = useCurrentAccount();
 
   const { formatWithCommas, parseFormattedValue } = useNumberFormat();
-  const { data: coinsData } = useSuiClientQuery(
+  const fromToken = searchFrom ?? "SUI";
+  const fromTokenType =
+    availableTokens.find((token) => token.symbol === fromToken)?.type ||
+    SUI_TYPE;
+
+  const { data: fromCoinsData } = useSuiClientQuery(
     "getCoins",
     {
       owner: currentAccount?.address || "",
-      coinType: SUI_TYPE,
+      coinType: fromTokenType,
     },
     {
       enabled: !!currentAccount?.address,
     }
   );
 
-  const totalRawBalance = coinsData?.data.reduce((sum, coin) => {
+  const toToken = searchTo ?? "CETUS";
+  const toTokenType =
+    availableTokens.find((token) => token.symbol === toToken)?.type || "";
+
+  const { data: toCoinsData } = useSuiClientQuery(
+    "getCoins",
+    {
+      owner: currentAccount?.address || "",
+      coinType: toTokenType,
+    },
+    {
+      enabled: !!currentAccount?.address && !!toTokenType,
+    }
+  );
+
+  const fromTokenRawBalance = fromCoinsData?.data.reduce((sum, coin) => {
     return sum + BigInt(coin.balance);
   }, BigInt(0));
-  const normalizedBalance = Coin.balanceWithDecimals(
-    totalRawBalance ? totalRawBalance : 0,
-    9
+
+  const fromTokenNormalizedBalance = Coin.balanceWithDecimals(
+    fromTokenRawBalance ? fromTokenRawBalance : 0,
+    aftermathData?.metadata?.decimals ?? 9
+  );
+
+  const toTokenRawBalance = toCoinsData?.data.reduce((sum, coin) => {
+    return sum + BigInt(coin.balance);
+  }, BigInt(0));
+
+  const toTokenNormalizedBalance = Coin.balanceWithDecimals(
+    toTokenRawBalance ? toTokenRawBalance : 0,
+    aftermathData?.metadata?.decimals ?? 9
   );
 
   const { control, watch, setValue } = useForm<z.infer<typeof formSchema>>({
     defaultValues: {
       fromAmount: formatWithCommas(""),
       toAmount: formatWithCommas(""),
+      slippage: "0.5",
     },
     mode: "onTouched",
     resolver: zodResolver(formSchema),
@@ -113,14 +159,6 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
 
   const pathname = usePathname();
   const { replace } = useRouter();
-
-  const availableTokens = [
-    { type: "0x2::sui::SUI", symbol: "SUI" },
-    {
-      type: "0x06864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS",
-      symbol: "CETUS",
-    },
-  ];
 
   const handleTokenChange = (position: "from" | "to", tokenType: string) => {
     const params = new URLSearchParams(searchParams);
@@ -148,7 +186,7 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
 
   function calculateTradeMetrics(tradeData: RouterCompleteTradeRoute) {
     if (!tradeData || !tradeData.routes || tradeData.routes.length === 0) {
-      throw new Error("Invalid trade data provided.");
+      console.error("No trade routes available");
     }
 
     const bestRoute = tradeData.routes.reduce((best, route) => {
@@ -174,7 +212,10 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
     return {
       bestRoute,
       slippage: slippage.toFixed(4) + "%",
-      minReceive: Coin.balanceWithDecimals(minReceive, 9).toString(),
+      minReceive: Coin.balanceWithDecimals(
+        minReceive,
+        aftermathData?.metadata?.decimals ?? 9
+      ).toString(),
     };
   }
 
@@ -184,6 +225,7 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
       {
         fromAmount: string;
         toAmount: string;
+        slippage: string;
       },
       "fromAmount"
     >
@@ -213,7 +255,7 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
             formatWithCommas(
               Coin.balanceWithDecimals(
                 result.coinOut.amount ? result.coinOut.amount : 0,
-                9
+                aftermathData?.metadata?.decimals ?? 9
               ).toString()
             )
           );
@@ -252,17 +294,18 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
     if (!currentAccount?.address || !swapRoute) return;
 
     try {
+      setSubmitLoading(true);
       const { success, transaction, error } = await generateTransaction({
         route: swapRoute as RouterCompleteTradeRoute,
         walletAddress: currentAccount.address,
-        slippage: 0.5,
+        slippage: Number(watch("slippage")),
       });
 
       if (!success || !transaction) {
+        setSubmitLoading(false);
         throw new Error(error || "Failed to generate transaction");
       }
 
-      // Execute the transaction
       await signAndExecute(
         {
           transaction: transaction,
@@ -280,6 +323,78 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
       );
     } catch (error) {
       console.error("Error in swap process:", error);
+      setSubmitLoading(false);
+    }
+  };
+
+  const handleMaxAmount = async () => {
+    if (!fromTokenNormalizedBalance) return;
+
+    const formattedBalance = formatWithCommas(fromTokenNormalizedBalance);
+
+    setValue("fromAmount", formattedBalance);
+
+    if (fromTokenNormalizedBalance > 0) {
+      try {
+        const from = searchFrom ?? "SUI";
+        const to = searchTo ?? "CETUS";
+        const result = await getSwapRoute(
+          from,
+          to,
+          fromTokenNormalizedBalance.toString()
+        );
+
+        setSwapRoute(result);
+
+        if ("error" in result) {
+          console.error("Error from server:", result.error);
+        } else {
+          setValue(
+            "toAmount",
+            formatWithCommas(
+              Coin.balanceWithDecimals(
+                result.coinOut.amount ? result.coinOut.amount : 0,
+                aftermathData?.metadata?.decimals ?? 9
+              ).toString()
+            )
+          );
+        }
+      } catch (error) {
+        console.error("Error calculating swap:", error);
+      }
+    }
+  };
+
+  const handleHalfAmount = async () => {
+    if (!fromTokenNormalizedBalance) return;
+
+    const halfBalance = (fromTokenNormalizedBalance / 2).toString();
+    const formattedHalfBalance = formatWithCommas(halfBalance);
+
+    setValue("fromAmount", formattedHalfBalance);
+
+    if (parseFloat(halfBalance) > 0) {
+      try {
+        const from = searchFrom ?? "SUI";
+        const to = searchTo ?? "CETUS";
+        const result = await getSwapRoute(from, to, halfBalance);
+
+        if ("error" in result) {
+          console.error("Error from server:", result.error);
+        } else {
+          setValue(
+            "toAmount",
+            formatWithCommas(
+              Coin.balanceWithDecimals(
+                result.coinOut.amount ? result.coinOut.amount : 0,
+                aftermathData?.metadata?.decimals ?? 9
+              ).toString()
+            )
+          );
+        }
+      } catch (error) {
+        console.error("Error calculating swap:", error);
+      }
     }
   };
 
@@ -295,9 +410,9 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
         <>
           <div className="text-center my-4">
             <h3>Wallet Balance</h3>
-            {coinsData !== undefined ? (
+            {fromTokenNormalizedBalance !== undefined ? (
               <p style={{ fontSize: "24px", fontWeight: "bold" }}>
-                {normalizedBalance} SUI
+                {fromTokenNormalizedBalance ?? ""} {searchFrom ?? "SUI"}
               </p>
             ) : (
               <p>Loading balance...</p>
@@ -312,7 +427,35 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
                 </div>
                 <div className="flex items-center gap-2">
                   <Settings className="h-4 w-4 text-gray-400" />
-                  <span className="text-xs text-gray-400">0.5%</span>
+                  <Controller
+                    name="slippage"
+                    control={control}
+                    render={({ field }) => (
+                      <div className="inline-flex items-center">
+                        <input
+                          type="text"
+                          value={field.value}
+                          onChange={(e) => {
+                            const value = e.target.value.replace(
+                              /[^0-9.]/g,
+                              ""
+                            );
+                            field.onChange(value);
+                          }}
+                          onBlur={() => {
+                            const parsed = parseFloat(field.value);
+                            if (isNaN(parsed) || parsed < 0) {
+                              field.onChange("0.5");
+                            } else {
+                              field.onChange(parsed.toString());
+                            }
+                          }}
+                          className="w-10 bg-transparent text-xs text-gray-400 text-right focus:outline-none"
+                        />
+                        <span className="text-xs text-gray-400">%</span>
+                      </div>
+                    )}
+                  />
                 </div>
               </div>
 
@@ -320,8 +463,18 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
                 <div className="flex justify-between items-center mb-1">
                   <span className="text-sm text-gray-400">You pay</span>
                   <div className="flex gap-2">
-                    <button className="text-xs text-orange-400">Half</button>
-                    <button className="text-xs text-orange-400">Max</button>
+                    <button
+                      className="text-xs text-orange-400 cursor-pointer"
+                      onClick={handleHalfAmount}
+                    >
+                      Half
+                    </button>
+                    <button
+                      className="text-xs text-orange-400 cursor-pointer"
+                      onClick={handleMaxAmount}
+                    >
+                      Max
+                    </button>
                   </div>
                 </div>
 
@@ -370,7 +523,7 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
                       </div>
                       <div className="flex items-center mt-1">
                         <span className="text-xs text-gray-500">
-                          {/* {fromAmount} */}
+                          Balance: {fromTokenNormalizedBalance ?? "0"}
                         </span>
                         <span className="ml-auto text-xs text-gray-500">
                           ${" "}
@@ -400,14 +553,6 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
               </div>
 
               <div className="p-4 border-b border-gray-800 mt-4">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-sm text-gray-400">You receive</span>
-                  <div className="flex gap-2">
-                    <button className="text-xs text-orange-400">Half</button>
-                    <button className="text-xs text-orange-400">Max</button>
-                  </div>
-                </div>
-
                 <Controller
                   name="toAmount"
                   control={control}
@@ -422,7 +567,7 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
                                 onChange={(e) =>
                                   handleTokenChange("to", e.target.value)
                                 }
-                                className="appearance-none bg-transparent border p-2 rounded w-full"
+                                className="appearance-none bg-transparent border border-none p-2 rounded w-full"
                               >
                                 {availableTokens.map((token) => (
                                   <option key={token.type} value={token.symbol}>
@@ -449,7 +594,7 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
                       </div>
                       <div className="flex items-center mt-1">
                         <span className="text-xs text-gray-500">
-                          {/* {toAmount} */}
+                          Balance: {toTokenNormalizedBalance || "0"}
                         </span>
                         <span className="ml-auto text-xs text-gray-500">
                           ${" "}
@@ -492,7 +637,65 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
 
               <div className="p-4 text-sm">
                 <div className="flex justify-between items-center text-gray-400">
-                  <span>1 CETUS = 0.04012897 SUI</span>
+                  {(() => {
+                    const fromTokenSymbol = searchFrom ?? "SUI";
+                    const toTokenSymbol = searchTo ?? "CETUS";
+
+                    if (!aftermathData?.priceInfo)
+                      return <span>Price unavailable</span>;
+
+                    let exchangeRate;
+
+                    const SUI_TYPE =
+                      "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
+                    const CETUS_TYPE =
+                      "0x06864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS";
+
+                    const suiPrice =
+                      aftermathData.priceInfo.multiPrices[SUI_TYPE];
+                    const cetusPrice =
+                      aftermathData.priceInfo.multiPrices[CETUS_TYPE];
+
+                    if (
+                      fromTokenSymbol === "SUI" &&
+                      toTokenSymbol === "CETUS"
+                    ) {
+                      exchangeRate = suiPrice / cetusPrice;
+                    } else if (
+                      fromTokenSymbol === "CETUS" &&
+                      toTokenSymbol === "SUI"
+                    ) {
+                      exchangeRate = cetusPrice / suiPrice;
+                    }
+
+                    if (
+                      swapRoute &&
+                      !("error" in swapRoute) &&
+                      parseFloat(watch("fromAmount") || "0") > 0
+                    ) {
+                      const fromAmount = BigInt(swapRoute.coinIn.amount);
+                      const toAmount = BigInt(swapRoute.coinOut.amount);
+
+                      if (fromAmount > 0) {
+                        const fromNormalized =
+                          Number(fromAmount) / Math.pow(10, 9);
+                        const toNormalized = Number(toAmount) / Math.pow(10, 9);
+                        exchangeRate = toNormalized / fromNormalized;
+                      }
+                    }
+
+                    const formattedRate = exchangeRate
+                      ? exchangeRate.toLocaleString(undefined, {
+                          maximumFractionDigits: 8,
+                        })
+                      : "---";
+
+                    return (
+                      <span>
+                        1 {fromTokenSymbol} = {formattedRate} {toTokenSymbol}
+                      </span>
+                    );
+                  })()}
                   <ArrowDownUp className="h-4 w-4" />
                 </div>
 
@@ -521,9 +724,16 @@ const SwapContract = ({ aftermathData }: SwapContractProps) => {
               <Button
                 type="button"
                 className="w-full bg-gray-700 hover:bg-gray-600 text-white py-6"
+                disabled={
+                  !watch("fromAmount") || !watch("toAmount") || submitLoading
+                }
                 onClick={handleSwap}
               >
-                Trade
+                {submitLoading ? (
+                  <span className="loader">Loading...</span>
+                ) : (
+                  <p>Trade </p>
+                )}
               </Button>
             </CardFooter>
           </Card>
